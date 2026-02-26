@@ -1,0 +1,59 @@
+{
+  "generated_at": "2026-02-26T00:00:00.000Z",
+  "repos": [
+    {
+      "id": 1,
+      "full_name": "withastro/astro",
+      "owner": {
+        "avatar_url": "https://avatars.githubusercontent.com/u/44914786?v=4"
+      },
+      "html_url": "https://github.com/withastro/astro",
+      "stargazers_count": 52000,
+      "forks": 2800,
+      "open_issues": 900,
+      "watchers": 52000,
+      "description": "The web framework for content-driven websites.",
+      "homepage": "https://astro.build",
+      "updated_at": "2026-02-20T10:00:00Z",
+      "license": {
+        "key": "mit"
+      },
+      "topics": [
+        "astro",
+        "typescript",
+        "web"
+      ],
+      "tags": [
+        "frontend",
+        "template"
+      ],
+      "remarks": "可作为页面模板参考"
+    },
+    {
+      "id": 2,
+      "full_name": "sindresorhus/awesome",
+      "owner": {
+        "avatar_url": "https://avatars.githubusercontent.com/u/170270?v=4"
+      },
+      "html_url": "https://github.com/sindresorhus/awesome",
+      "stargazers_count": 320000,
+      "forks": 27000,
+      "open_issues": 40,
+      "watchers": 320000,
+      "description": "Awesome lists about all kinds of interesting topics.",
+      "homepage": "https://awesome.re",
+      "updated_at": "2026-02-18T08:00:00Z",
+      "license": {
+        "key": "cc0-1.0"
+      },
+      "topics": [
+        "awesome",
+        "curated"
+      ],
+      "tags": [
+        "resources"
+      ],
+      "remarks": "收集灵感"
+    }
+  ]
+}

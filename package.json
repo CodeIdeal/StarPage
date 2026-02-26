@@ -1,0 +1,20 @@
+{
+  "name": "star-page",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "check": "astro check",
+    "sync-stars": "tsx scripts/sync-stars.ts"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.6",
+    "@types/node": "^24.6.0",
+    "astro": "^5.14.1",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}

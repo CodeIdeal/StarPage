@@ -1,0 +1,249 @@
+---
+import rawData from '../assets/data.json';
+---
+
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>StarPage</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #0f172a;
+        --panel: #111827;
+        --panel-soft: #1f2937;
+        --text: #e5e7eb;
+        --muted: #94a3b8;
+        --primary: #38bdf8;
+        --border: #334155;
+        --danger: #f43f5e;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      .page {
+        max-width: 1400px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+
+      .toolbar {
+        display: grid;
+        grid-template-columns: auto 1fr auto auto auto;
+        gap: 12px;
+        align-items: center;
+        margin-bottom: 16px;
+      }
+
+      .logo {
+        font-size: 22px;
+        font-weight: 700;
+      }
+
+      input, select, textarea, button {
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: var(--panel);
+        color: var(--text);
+        padding: 8px 10px;
+        font: inherit;
+      }
+
+      button {
+        cursor: pointer;
+      }
+
+      button.primary {
+        background: var(--primary);
+        color: #082f49;
+        border: none;
+        font-weight: 600;
+      }
+
+      button.danger {
+        color: white;
+        background: var(--danger);
+        border: none;
+      }
+
+      .status {
+        font-size: 12px;
+        color: var(--muted);
+        text-align: right;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: 1fr 3fr;
+        gap: 16px;
+      }
+
+      .panel {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--panel);
+        padding: 12px;
+      }
+
+      .tags-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .tag-chip {
+        border: 1px solid var(--border);
+        background: var(--panel-soft);
+        border-radius: 999px;
+        padding: 4px 8px;
+        font-size: 12px;
+      }
+
+      .tag-chip.active {
+        border-color: var(--primary);
+        color: var(--primary);
+      }
+
+      .cards {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .card {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--panel);
+        padding: 12px;
+        display: grid;
+        gap: 8px;
+      }
+
+      .repo-title {
+        color: var(--primary);
+        font-size: 14px;
+        text-decoration: none;
+        word-break: break-all;
+      }
+
+      .meta {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .owner {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .owner img {
+        width: 22px;
+        height: 22px;
+        border-radius: 999px;
+      }
+
+      .card-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .tiny {
+        padding: 2px 6px;
+        font-size: 11px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: #0b1220;
+      }
+
+      .editor {
+        display: grid;
+        gap: 8px;
+        border-top: 1px dashed var(--border);
+        padding-top: 8px;
+      }
+
+      .empty {
+        grid-column: 1 / -1;
+        color: var(--muted);
+      }
+
+      .hint {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .device-flow {
+        margin-bottom: 10px;
+        padding: 10px;
+        border: 1px dashed var(--border);
+        border-radius: 8px;
+        font-size: 13px;
+      }
+
+      @media (max-width: 1200px) {
+        .cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      }
+
+      @media (max-width: 960px) {
+        .toolbar {
+          grid-template-columns: 1fr;
+        }
+        .status { text-align: left; }
+        .layout {
+          grid-template-columns: 1fr;
+        }
+        .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      }
+
+      @media (max-width: 640px) {
+        .tags-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .cards { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <section class="toolbar">
+        <div class="logo">StarPage</div>
+        <input id="search" placeholder="搜索仓库名、描述、topic、tag" />
+        <select id="sort">
+          <option value="updated_desc">最近更新</option>
+          <option value="stars_desc">Star 数量</option>
+          <option value="forks_desc">Fork 数量</option>
+          <option value="name_asc">名称 A-Z</option>
+        </select>
+        <select id="topic-filter">
+          <option value="all">全部 Topic</option>
+        </select>
+        <div>
+          <button id="auth-btn">Owner 授权</button>
+          <button id="logout-btn" class="danger" style="display:none">退出</button>
+        </div>
+      </section>
+
+      <div class="status" id="auth-status">未授权：只读模式</div>
+      <div id="device-flow" class="device-flow" style="display:none"></div>
+
+      <section class="layout">
+        <aside class="panel">
+          <h3>Tags</h3>
+          <div id="tags" class="tags-grid"></div>
+        </aside>
+        <section class="cards" id="cards"></section>
+      </section>
+    </main>
+
+    <script id="initial-data" type="application/json" is:inline set:html={JSON.stringify(rawData)}></script>
+    <script src="../scripts/app.ts"></script>
+  </body>
+</html>
