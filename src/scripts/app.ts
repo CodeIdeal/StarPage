@@ -26,7 +26,13 @@ const state = {
   tag: 'all',
   ownerAuthorized: false,
   token: null as string | null,
-  editCache: new Map<number, { tags: string; remarks: string }>()
+  editCache: new Map<number, { tags: string; remarks: string }>(),
+  visibleRepos: [] as StarRepo[],
+  renderedCount: 0,
+  batchSize: 24,
+  loadThresholdPx: 360,
+  isAppending: false,
+  scrollTicking: false
 };
 
 const searchEl = document.getElementById('search') as HTMLInputElement | null;
@@ -34,6 +40,7 @@ const sortEl = document.getElementById('sort') as HTMLSelectElement | null;
 const topicFilterEl = document.getElementById('topic-filter') as HTMLSelectElement | null;
 const tagsEl = document.getElementById('tags') as HTMLDivElement | null;
 const topicsEl = document.getElementById('topics') as HTMLDivElement | null;
+const cardsScrollEl = document.getElementById('cards') as HTMLElement | null;
 const cardsEl = document.getElementById('cards-grid') as HTMLDivElement | null;
 const authBtn = document.getElementById('auth-btn') as HTMLButtonElement | null;
 const logoutBtn = document.getElementById('logout-btn') as HTMLButtonElement | null;
@@ -339,13 +346,156 @@ function buildEditor(repo: StarRepo): HTMLDivElement {
   return wrap;
 }
 
+function createRepoCard(repo: StarRepo): HTMLElement {
+  const card = document.createElement('article');
+  card.className = 'mb-2 break-inside-avoid card border border-base-content/15 bg-base-100/95 shadow-sm shadow-base-300/25';
+
+  const body = document.createElement('div');
+  body.className = 'card-body gap-2.5 p-3';
+
+  const titleWrap = document.createElement('div');
+  titleWrap.className = 'flex items-start justify-between gap-2';
+
+  const link = document.createElement('a');
+  link.className = 'link link-primary break-all text-base font-semibold text-primary/95 hover:text-primary';
+  link.href = repo.html_url;
+  link.target = '_blank';
+  link.rel = 'noreferrer';
+  link.textContent = repo.full_name;
+
+  const owner = document.createElement('div');
+  owner.className = 'flex items-center gap-2';
+
+  const avatar = document.createElement('img');
+  avatar.src = repo.owner.avatar_url;
+  avatar.alt = 'owner avatar';
+  avatar.className = 'h-6 w-6 rounded-full ring-1 ring-base-content/25';
+
+  const updated = document.createElement('span');
+  updated.className = 'text-xs text-base-content/70';
+  updated.textContent = formatTimeAgo(repo.updated_at);
+
+  owner.append(avatar, updated);
+  titleWrap.append(link);
+
+  const desc = document.createElement('p');
+  desc.className = 'text-sm leading-5 text-base-content/88';
+  desc.textContent = repo.description || '无描述';
+
+  const stats = document.createElement('div');
+  stats.className = 'flex flex-wrap gap-1.5';
+
+  const starBadge = document.createElement('span');
+  starBadge.className = 'badge badge-sm gap-1.5 border border-base-content/35 bg-base-200/90 px-2 text-base-content';
+  starBadge.innerHTML = '<svg viewBox="0 0 16 16" class="h-3.5 w-3.5 text-base-content/72" fill="currentColor" aria-hidden="true"><path d="M8 .25a.75.75 0 0 1 .673.418l1.88 3.81 4.204.611a.75.75 0 0 1 .416 1.279l-3.042 2.966.718 4.187a.75.75 0 0 1-1.088.79L8 12.347l-3.761 1.978a.75.75 0 0 1-1.088-.79l.718-4.187L.827 6.368a.75.75 0 0 1 .416-1.279l4.204-.611 1.88-3.81A.75.75 0 0 1 8 .25Z"></path></svg><span class="font-semibold text-base-content">' + formatCount(repo.stargazers_count) + '</span>';
+
+  const forkBadge = document.createElement('span');
+  forkBadge.className = 'badge badge-sm gap-1.5 border border-base-content/35 bg-base-200/90 px-2 text-base-content';
+  forkBadge.innerHTML = '<svg viewBox="0 0 16 16" class="h-3.5 w-3.5 text-base-content/72" fill="none" aria-hidden="true" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="3.5" r="1.75"></circle><circle cx="12" cy="3.5" r="1.75"></circle><circle cx="8" cy="12.25" r="1.75"></circle><path d="M8 10.5V8c0-1.4-1.1-2.5-2.5-2.5H5.75"></path><path d="M8 10.5V8c0-1.4 1.1-2.5 2.5-2.5h-.25"></path></svg><span class="font-semibold text-base-content">' + formatCount(repo.forks) + '</span>';
+
+  const watcherBadge = document.createElement('span');
+  watcherBadge.className = 'badge badge-sm gap-1.5 border border-base-content/35 bg-base-200/90 px-2 text-base-content';
+  watcherBadge.innerHTML = '<svg viewBox="0 0 16 16" class="h-3.5 w-3.5 text-base-content/72" fill="currentColor" aria-hidden="true"><path d="M1.679 7.932a.75.75 0 0 1 0-.864C2.944 5.161 5.188 3 8 3s5.056 2.161 6.321 4.068a.75.75 0 0 1 0 .864C13.056 9.839 10.812 12 8 12S2.944 9.839 1.679 7.932ZM8 10.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z"></path></svg><span class="font-semibold text-base-content">' + formatCount(repo.watchers) + '</span>';
+
+  const issueBadge = document.createElement('span');
+  issueBadge.className = 'badge badge-sm gap-1.5 border border-base-content/35 bg-base-200/90 px-2 text-base-content';
+  issueBadge.innerHTML = '<svg viewBox="0 0 16 16" class="h-3.5 w-3.5 text-base-content/72" fill="currentColor" aria-hidden="true"><path d="M8 1.5a6.5 6.5 0 1 1 0 13 6.5 6.5 0 0 1 0-13ZM8.75 4.75a.75.75 0 0 0-1.5 0v3.5a.75.75 0 0 0 1.5 0v-3.5ZM8 10.5a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z"></path></svg><span class="font-semibold text-base-content">' + formatCount(repo.open_issues) + '</span>';
+
+  stats.append(starBadge, forkBadge, watcherBadge, issueBadge);
+
+  const topics = document.createElement('div');
+  topics.className = 'flex flex-wrap gap-1.5';
+  (repo.topics || []).forEach((topic) => {
+    const item = document.createElement('span');
+    item.className = 'badge badge-sm border border-info/55 bg-info/20 text-info-content';
+    item.textContent = `#${topic}`;
+    topics.appendChild(item);
+  });
+
+  const tags = document.createElement('div');
+  tags.className = 'flex flex-wrap gap-1.5';
+  (repo.tags || []).forEach((tag) => {
+    const item = document.createElement('span');
+    item.className = 'badge badge-sm border border-primary/60 bg-primary/25 font-medium text-base-content';
+    item.textContent = `@${tag}`;
+    tags.appendChild(item);
+  });
+
+  const remarksWrap = document.createElement('div');
+  remarksWrap.className = 'mt-0.5 border-t border-dashed border-base-content/28 pt-2';
+
+  const remarks = document.createElement('p');
+  remarks.className = 'text-xs italic leading-5 text-base-content/62';
+  remarks.textContent = `备注: ${repo.remarks || '-'}`;
+
+  remarksWrap.appendChild(remarks);
+
+  body.append(titleWrap, owner, desc, stats, topics, tags, remarksWrap);
+
+  if (state.ownerAuthorized) {
+    body.appendChild(buildEditor(repo));
+  }
+
+  card.appendChild(body);
+  return card;
+}
+
+function recomputeVisibleRepos(): void {
+  state.visibleRepos = filteredRepos();
+}
+
+function resetCardList(): void {
+  if (!cardsEl) return;
+  cardsEl.innerHTML = '';
+  state.renderedCount = 0;
+  state.isAppending = false;
+}
+
+function appendNextBatch(): void {
+  if (!cardsEl || state.isAppending) return;
+  if (state.renderedCount >= state.visibleRepos.length) return;
+
+  state.isAppending = true;
+
+  const end = Math.min(state.renderedCount + state.batchSize, state.visibleRepos.length);
+  const fragment = document.createDocumentFragment();
+
+  for (let index = state.renderedCount; index < end; index += 1) {
+    const repo = state.visibleRepos[index];
+    fragment.appendChild(createRepoCard(repo));
+  }
+
+  cardsEl.appendChild(fragment);
+  state.renderedCount = end;
+  state.isAppending = false;
+}
+
+function fillUntilScrollable(): void {
+  if (!cardsScrollEl) return;
+
+  while (state.renderedCount < state.visibleRepos.length && cardsScrollEl.scrollHeight <= cardsScrollEl.clientHeight) {
+    const before = state.renderedCount;
+    appendNextBatch();
+    if (state.renderedCount === before) break;
+  }
+}
+
+function loadMoreIfNeeded(): void {
+  if (!cardsScrollEl || state.isAppending) return;
+
+  const remaining = cardsScrollEl.scrollHeight - cardsScrollEl.scrollTop - cardsScrollEl.clientHeight;
+  if (remaining <= state.loadThresholdPx) {
+    appendNextBatch();
+  }
+}
+
 function renderCards(): void {
   if (!cardsEl) return;
 
-  const repos = filteredRepos();
-  cardsEl.innerHTML = '';
+  recomputeVisibleRepos();
+  resetCardList();
 
-  if (!repos.length) {
+  if (!state.visibleRepos.length) {
     const empty = document.createElement('div');
     empty.className = 'mb-2 break-inside-avoid alert rounded-box border border-base-content/15 bg-base-100/95 text-base-content/85 shadow-sm';
     empty.textContent = '没有匹配结果。';
@@ -353,99 +503,12 @@ function renderCards(): void {
     return;
   }
 
-  repos.forEach((repo) => {
-    const card = document.createElement('article');
-    card.className = 'mb-2 break-inside-avoid card border border-base-content/15 bg-base-100/95 shadow-sm shadow-base-300/25';
+  appendNextBatch();
+  fillUntilScrollable();
 
-    const body = document.createElement('div');
-    body.className = 'card-body gap-2.5 p-3';
-
-    const titleWrap = document.createElement('div');
-    titleWrap.className = 'flex items-start justify-between gap-2';
-
-    const link = document.createElement('a');
-    link.className = 'link link-primary break-all text-base font-semibold text-primary/95 hover:text-primary';
-    link.href = repo.html_url;
-    link.target = '_blank';
-    link.rel = 'noreferrer';
-    link.textContent = repo.full_name;
-
-    const owner = document.createElement('div');
-    owner.className = 'flex items-center gap-2';
-
-    const avatar = document.createElement('img');
-    avatar.src = repo.owner.avatar_url;
-    avatar.alt = 'owner avatar';
-    avatar.className = 'h-6 w-6 rounded-full ring-1 ring-base-content/25';
-
-    const updated = document.createElement('span');
-    updated.className = 'text-xs text-base-content/70';
-    updated.textContent = formatTimeAgo(repo.updated_at);
-
-    owner.append(avatar, updated);
-    titleWrap.append(link);
-
-    const desc = document.createElement('p');
-    desc.className = 'text-sm leading-5 text-base-content/88';
-    desc.textContent = repo.description || '无描述';
-
-    const stats = document.createElement('div');
-    stats.className = 'flex flex-wrap gap-1.5';
-
-    const starBadge = document.createElement('span');
-    starBadge.className = 'badge badge-sm gap-1.5 border border-base-content/35 bg-base-200/90 px-2 text-base-content';
-    starBadge.innerHTML = '<svg viewBox="0 0 16 16" class="h-3.5 w-3.5 text-base-content/72" fill="currentColor" aria-hidden="true"><path d="M8 .25a.75.75 0 0 1 .673.418l1.88 3.81 4.204.611a.75.75 0 0 1 .416 1.279l-3.042 2.966.718 4.187a.75.75 0 0 1-1.088.79L8 12.347l-3.761 1.978a.75.75 0 0 1-1.088-.79l.718-4.187L.827 6.368a.75.75 0 0 1 .416-1.279l4.204-.611 1.88-3.81A.75.75 0 0 1 8 .25Z"></path></svg><span class="font-semibold text-base-content">' + formatCount(repo.stargazers_count) + '</span>';
-
-    const forkBadge = document.createElement('span');
-    forkBadge.className = 'badge badge-sm gap-1.5 border border-base-content/35 bg-base-200/90 px-2 text-base-content';
-    forkBadge.innerHTML = '<svg viewBox="0 0 16 16" class="h-3.5 w-3.5 text-base-content/72" fill="none" aria-hidden="true" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="3.5" r="1.75"></circle><circle cx="12" cy="3.5" r="1.75"></circle><circle cx="8" cy="12.25" r="1.75"></circle><path d="M8 10.5V8c0-1.4-1.1-2.5-2.5-2.5H5.75"></path><path d="M8 10.5V8c0-1.4 1.1-2.5 2.5-2.5h-.25"></path></svg><span class="font-semibold text-base-content">' + formatCount(repo.forks) + '</span>';
-
-    const watcherBadge = document.createElement('span');
-    watcherBadge.className = 'badge badge-sm gap-1.5 border border-base-content/35 bg-base-200/90 px-2 text-base-content';
-    watcherBadge.innerHTML = '<svg viewBox="0 0 16 16" class="h-3.5 w-3.5 text-base-content/72" fill="currentColor" aria-hidden="true"><path d="M1.679 7.932a.75.75 0 0 1 0-.864C2.944 5.161 5.188 3 8 3s5.056 2.161 6.321 4.068a.75.75 0 0 1 0 .864C13.056 9.839 10.812 12 8 12S2.944 9.839 1.679 7.932ZM8 10.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z"></path></svg><span class="font-semibold text-base-content">' + formatCount(repo.watchers) + '</span>';
-
-    const issueBadge = document.createElement('span');
-    issueBadge.className = 'badge badge-sm gap-1.5 border border-base-content/35 bg-base-200/90 px-2 text-base-content';
-    issueBadge.innerHTML = '<svg viewBox="0 0 16 16" class="h-3.5 w-3.5 text-base-content/72" fill="currentColor" aria-hidden="true"><path d="M8 1.5a6.5 6.5 0 1 1 0 13 6.5 6.5 0 0 1 0-13ZM8.75 4.75a.75.75 0 0 0-1.5 0v3.5a.75.75 0 0 0 1.5 0v-3.5ZM8 10.5a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z"></path></svg><span class="font-semibold text-base-content">' + formatCount(repo.open_issues) + '</span>';
-
-    stats.append(starBadge, forkBadge, watcherBadge, issueBadge);
-
-    const topics = document.createElement('div');
-    topics.className = 'flex flex-wrap gap-1.5';
-    (repo.topics || []).forEach((topic) => {
-      const item = document.createElement('span');
-      item.className = 'badge badge-sm border border-info/55 bg-info/20 text-info-content';
-      item.textContent = `#${topic}`;
-      topics.appendChild(item);
-    });
-
-    const tags = document.createElement('div');
-    tags.className = 'flex flex-wrap gap-1.5';
-    (repo.tags || []).forEach((tag) => {
-      const item = document.createElement('span');
-      item.className = 'badge badge-sm border border-primary/60 bg-primary/25 font-medium text-base-content';
-      item.textContent = `@${tag}`;
-      tags.appendChild(item);
-    });
-
-    const remarksWrap = document.createElement('div');
-    remarksWrap.className = 'mt-0.5 border-t border-dashed border-base-content/28 pt-2';
-
-    const remarks = document.createElement('p');
-    remarks.className = 'text-xs italic leading-5 text-base-content/62';
-    remarks.textContent = `备注: ${repo.remarks || '-'}`;
-
-    remarksWrap.appendChild(remarks);
-
-    body.append(titleWrap, owner, desc, stats, topics, tags, remarksWrap);
-
-    if (state.ownerAuthorized) {
-      body.appendChild(buildEditor(repo));
-    }
-
-    card.appendChild(body);
-    cardsEl.appendChild(card);
-  });
+  if (cardsScrollEl) {
+    cardsScrollEl.scrollTop = 0;
+  }
 }
 
 function renderAuthStatus(): void {
@@ -510,6 +573,15 @@ sortEl?.addEventListener('change', (event) => {
 topicFilterEl?.addEventListener('change', (event) => {
   state.topic = (event.target as HTMLSelectElement).value;
   render();
+});
+
+cardsScrollEl?.addEventListener('scroll', () => {
+  if (state.scrollTicking) return;
+  state.scrollTicking = true;
+  window.requestAnimationFrame(() => {
+    loadMoreIfNeeded();
+    state.scrollTicking = false;
+  });
 });
 
 themeToggleEl?.addEventListener('click', () => {
