@@ -1,0 +1,32 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html[data-theme='starpage'] {
+  color-scheme: dark;
+}
+
+html[data-theme='starpage-light'] {
+  color-scheme: light;
+}
+
+body {
+  @apply h-screen overflow-hidden bg-base-300 text-base-content antialiased;
+}
+
+::selection {
+  @apply bg-primary text-primary-content;
+}
+
+@layer base {
+  .input::placeholder,
+  .textarea::placeholder {
+    @apply text-base-content;
+    opacity: 0.6;
+  }
+
+  .btn:disabled,
+  .btn[disabled] {
+    @apply opacity-55;
+  }
+}
