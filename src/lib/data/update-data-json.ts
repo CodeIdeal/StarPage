@@ -8,6 +8,34 @@ function applyCustomFields(
   remarks: string
 ): StarRepoData {
   const normalizedTags = Array.from(new Set(tags.map((item) => item.trim()).filter(Boolean))).slice(0, 20);
+  const normalizedRemarks = remarks.trim();
+  const index = source.repos.findIndex((repo) => repo.id === repoId);
+
+  if (index < 0) {
+    return {
+      ...source,
+      repos: [
+        ...source.repos,
+        {
+          id: repoId,
+          full_name: '',
+          owner: { avatar_url: '' },
+          html_url: '',
+          stargazers_count: 0,
+          forks: 0,
+          open_issues: 0,
+          watchers: 0,
+          description: '',
+          homepage: '',
+          updated_at: source.generated_at || new Date().toISOString(),
+          license: null,
+          topics: [],
+          tags: normalizedTags,
+          remarks: normalizedRemarks
+        }
+      ]
+    };
+  }
 
   return {
     ...source,
@@ -16,7 +44,7 @@ function applyCustomFields(
         ? {
             ...repo,
             tags: normalizedTags,
-            remarks: remarks.trim()
+            remarks: normalizedRemarks
           }
         : repo
     )

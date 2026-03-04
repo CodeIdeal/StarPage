@@ -54,6 +54,22 @@ export async function getContentFile(location: DataFileLocation, token: string):
   };
 }
 
+export async function getPublicContentFile(location: DataFileLocation): Promise<string> {
+  const url = `https://api.github.com/repos/${encodeURIComponent(location.owner)}/${encodeURIComponent(location.repo)}/contents/${encodePath(location.path)}?ref=${encodeURIComponent(location.branch)}`;
+  const response = await fetch(url, {
+    headers: {
+      Accept: 'application/vnd.github+json'
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to read public content file: ${response.status}`);
+  }
+
+  const file = (await response.json()) as GitHubContentFile;
+  return fromBase64Utf8(file.content);
+}
+
 export async function updateContentFile(params: {
   location: DataFileLocation;
   token: string;

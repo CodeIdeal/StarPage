@@ -83,6 +83,14 @@ export function createStarPageTheme(themeName: string) {
     components: {
       MuiCssBaseline: {
         styleOverrides: {
+          '*': {
+            scrollbarWidth: 'none',
+            msOverflowStyle: 'none'
+          },
+          '*::-webkit-scrollbar': {
+            width: 0,
+            height: 0
+          },
           body: {
             margin: 0
           }

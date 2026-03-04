@@ -18,21 +18,21 @@ import {
   Stack,
   TextField,
   ThemeProvider,
-  Typography
+  Typography,
+  useMediaQuery
 } from '@mui/material';
 import type { SelectChangeEvent } from '@mui/material/Select';
 import DarkModeRoundedIcon from '@mui/icons-material/DarkModeRounded';
 import LightModeRoundedIcon from '@mui/icons-material/LightModeRounded';
 import StarRoundedIcon from '@mui/icons-material/StarRounded';
 import CallSplitRoundedIcon from '@mui/icons-material/CallSplitRounded';
-import RemoveRedEyeRoundedIcon from '@mui/icons-material/RemoveRedEyeRounded';
 import ErrorOutlineRoundedIcon from '@mui/icons-material/ErrorOutlineRounded';
-import LabelRoundedIcon from '@mui/icons-material/LabelRounded';
 import SellRoundedIcon from '@mui/icons-material/SellRounded';
 import type { StarRepo, StarRepoData } from '../../types/star-repo';
 import { requestDeviceCode, pollForAccessToken } from '../../lib/auth/github-device-flow';
 import { clearToken, getToken, setToken, validateOwnerToken } from '../../lib/auth/session';
 import { saveRepoCustomFields } from '../../lib/data/update-data-json';
+import { getPublicContentFile } from '../../lib/github/contents-api';
 import {
   createStarPageTheme,
   DARK_THEME,
@@ -59,6 +59,7 @@ type SavingMap = Record<number, boolean>;
 
 const OWNER_LOGIN = import.meta.env.PUBLIC_GITHUB_OWNER_LOGIN;
 const CLIENT_ID = import.meta.env.PUBLIC_GITHUB_OAUTH_CLIENT_ID;
+const STARRED_USERNAME = import.meta.env.PUBLIC_GITHUB_STARRED_USERNAME || OWNER_LOGIN;
 const DATA_LOCATION = {
   owner: import.meta.env.PUBLIC_GITHUB_DATA_REPO_OWNER || OWNER_LOGIN,
   repo: import.meta.env.PUBLIC_GITHUB_DATA_REPO_NAME,
@@ -68,6 +69,10 @@ const DATA_LOCATION = {
 
 const BATCH_SIZE = 24;
 const LOAD_THRESHOLD = 360;
+const EMPTY_DATA: StarRepoData = {
+  generated_at: '',
+  repos: []
+};
 
 const SORT_OPTIONS: Array<{ value: SortKey; label: string }> = [
   { value: 'updated_desc', label: '最近更新' },
@@ -139,8 +144,94 @@ function createDefaultDraft(repo: StarRepo): EditDraft {
   };
 }
 
-export default function StarPageApp(props: { initialData: StarRepoData }) {
-  const [data, setData] = useState<StarRepoData>(props.initialData);
+function mapGitHubRepo(raw: any): StarRepo {
+  return {
+    id: raw.id,
+    full_name: raw.full_name || '',
+    owner: {
+      avatar_url: raw.owner?.avatar_url || ''
+    },
+    html_url: raw.html_url || '',
+    stargazers_count: raw.stargazers_count ?? 0,
+    forks: raw.forks_count ?? 0,
+    open_issues: raw.open_issues_count ?? 0,
+    watchers: raw.watchers_count ?? 0,
+    description: raw.description ?? '',
+    homepage: raw.homepage ?? '',
+    updated_at: raw.updated_at || new Date().toISOString(),
+    license: raw.license?.key ? { key: raw.license.key } : null,
+    topics: Array.isArray(raw.topics) ? raw.topics : [],
+    tags: [],
+    remarks: ''
+  };
+}
+
+async function fetchAllPublicStarred(username: string): Promise<StarRepo[]> {
+  const repos: StarRepo[] = [];
+  const seenIds = new Set<number>();
+  let page = 1;
+
+  while (true) {
+    const response = await fetch(`https://api.github.com/users/${encodeURIComponent(username)}/starred?per_page=100&page=${page}`, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28'
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`GitHub starred fetch failed: ${response.status}`);
+    }
+
+    const pageItems = (await response.json()) as any[];
+    if (!pageItems.length) {
+      break;
+    }
+
+    pageItems.forEach((item) => {
+      const mapped = mapGitHubRepo(item);
+      if (!seenIds.has(mapped.id)) {
+        seenIds.add(mapped.id);
+        repos.push(mapped);
+      }
+    });
+
+    page += 1;
+  }
+
+  return repos;
+}
+
+function parseCustomFieldsData(raw: string): StarRepoData {
+  const parsed = JSON.parse(raw) as Partial<StarRepoData>;
+  return {
+    generated_at: typeof parsed.generated_at === 'string' ? parsed.generated_at : '',
+    repos: Array.isArray(parsed.repos) ? (parsed.repos as StarRepo[]) : []
+  };
+}
+
+function mergeLiveWithCustomFields(liveRepos: StarRepo[], customData: StarRepoData): StarRepoData {
+  const customById = new Map(
+    customData.repos.map((repo) => [repo.id, { tags: repo.tags ?? [], remarks: repo.remarks ?? '' }])
+  );
+
+  return {
+    generated_at: new Date().toISOString(),
+    repos: liveRepos.map((repo) => {
+      const custom = customById.get(repo.id);
+      return custom
+        ? {
+            ...repo,
+            tags: custom.tags,
+            remarks: custom.remarks
+          }
+        : repo;
+    })
+  };
+}
+
+export default function StarPageApp() {
+  const [data, setData] = useState<StarRepoData>(EMPTY_DATA);
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState<SortKey>('updated_desc');
   const [topic, setTopic] = useState('all');
@@ -155,8 +246,60 @@ export default function StarPageApp(props: { initialData: StarRepoData }) {
   const [saveMessages, setSaveMessages] = useState<SaveMessageMap>({});
   const [savingByRepo, setSavingByRepo] = useState<SavingMap>({});
   const [renderedCount, setRenderedCount] = useState(BATCH_SIZE);
+  const [batchHintVisible, setBatchHintVisible] = useState(false);
+  const [batchHintText, setBatchHintText] = useState('');
+  const [reposLoading, setReposLoading] = useState(true);
+  const [reposError, setReposError] = useState('');
 
   const cardsScrollRef = useRef<HTMLDivElement | null>(null);
+  const batchHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadRepos = async () => {
+      if (!STARRED_USERNAME) {
+        if (!cancelled) {
+          setReposLoading(false);
+          setReposError('缺少 PUBLIC_GITHUB_STARRED_USERNAME 配置，无法加载仓库。');
+        }
+        return;
+      }
+
+      try {
+        setReposLoading(true);
+        setReposError('');
+
+        const liveRepos = await fetchAllPublicStarred(STARRED_USERNAME);
+
+        let customData = EMPTY_DATA;
+        if (DATA_LOCATION.owner && DATA_LOCATION.repo) {
+          try {
+            const customRaw = await getPublicContentFile(DATA_LOCATION);
+            customData = parseCustomFieldsData(customRaw);
+          } catch {
+            customData = EMPTY_DATA;
+          }
+        }
+
+        if (cancelled) return;
+        setData(mergeLiveWithCustomFields(liveRepos, customData));
+      } catch (error) {
+        if (cancelled) return;
+        setReposError(`仓库加载失败: ${error instanceof Error ? error.message : 'unknown error'}`);
+      } finally {
+        if (!cancelled) {
+          setReposLoading(false);
+        }
+      }
+    };
+
+    void loadRepos();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const initialTheme = resolveStoredTheme();
@@ -169,6 +312,10 @@ export default function StarPageApp(props: { initialData: StarRepoData }) {
 
   const muiTheme = useMemo(() => createStarPageTheme(themeName), [themeName]);
   const isDark = themeName === DARK_THEME;
+  const upSm = useMediaQuery(muiTheme.breakpoints.up('sm'), { noSsr: true });
+  const upLg = useMediaQuery(muiTheme.breakpoints.up('lg'), { noSsr: true });
+  const upXl = useMediaQuery(muiTheme.breakpoints.up('xl'), { noSsr: true });
+  const cardColumnCount = upXl ? 4 : upLg ? 3 : upSm ? 2 : 1;
 
   const topics = useMemo(() => collectTopics(data), [data]);
   const tags = useMemo(() => collectTags(data), [data]);
@@ -209,22 +356,73 @@ export default function StarPageApp(props: { initialData: StarRepoData }) {
   }, [data, search, topic, tag, sort]);
 
   const visibleRepos = useMemo(() => filteredRepos.slice(0, renderedCount), [filteredRepos, renderedCount]);
+  const reposByColumns = useMemo(() => {
+    const columns: StarRepo[][] = Array.from({ length: cardColumnCount }, () => []);
+    visibleRepos.forEach((repo, index) => {
+      columns[index % cardColumnCount].push(repo);
+    });
+    return columns;
+  }, [visibleRepos, cardColumnCount]);
+
+  const hideBatchHint = useCallback(() => {
+    if (batchHintTimerRef.current) {
+      clearTimeout(batchHintTimerRef.current);
+      batchHintTimerRef.current = null;
+    }
+  }, []);
+
+  const showBatchHint = useCallback(
+    (loaded: number, total: number) => {
+      hideBatchHint();
+      setBatchHintText(`已加载 ${loaded} / ${total} 个仓库`);
+      setBatchHintVisible(true);
+      batchHintTimerRef.current = setTimeout(() => {
+        setBatchHintVisible(false);
+        batchHintTimerRef.current = null;
+      }, 3000);
+    },
+    [hideBatchHint]
+  );
+
+  const increaseRenderedCount = useCallback(
+    (reason: 'scroll' | 'fill' | 'reset') => {
+      setRenderedCount((previous) => {
+        const next = reason === 'reset' ? Math.min(BATCH_SIZE, filteredRepos.length) : Math.min(previous + BATCH_SIZE, filteredRepos.length);
+
+        if (reason !== 'reset' && next > previous) {
+          showBatchHint(next, filteredRepos.length);
+        }
+
+        return next;
+      });
+    },
+    [filteredRepos.length, showBatchHint]
+  );
 
   useEffect(() => {
-    setRenderedCount(Math.min(BATCH_SIZE, filteredRepos.length));
+    setBatchHintVisible(false);
+    hideBatchHint();
+    increaseRenderedCount('reset');
+
     if (cardsScrollRef.current) {
       cardsScrollRef.current.scrollTop = 0;
     }
-  }, [filteredRepos]);
+  }, [filteredRepos, hideBatchHint, increaseRenderedCount]);
 
   useEffect(() => {
     const scrollEl = cardsScrollRef.current;
     if (!scrollEl) return;
 
     if (renderedCount < filteredRepos.length && scrollEl.scrollHeight <= scrollEl.clientHeight) {
-      setRenderedCount((previous) => Math.min(previous + BATCH_SIZE, filteredRepos.length));
+      increaseRenderedCount('fill');
     }
-  }, [renderedCount, filteredRepos.length, visibleRepos.length]);
+  }, [renderedCount, filteredRepos.length, visibleRepos.length, increaseRenderedCount]);
+
+  useEffect(() => {
+    return () => {
+      hideBatchHint();
+    };
+  }, [hideBatchHint]);
 
   const loadMoreIfNeeded = useCallback(() => {
     const scrollEl = cardsScrollRef.current;
@@ -232,9 +430,9 @@ export default function StarPageApp(props: { initialData: StarRepoData }) {
 
     const remaining = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight;
     if (remaining <= LOAD_THRESHOLD) {
-      setRenderedCount((previous) => Math.min(previous + BATCH_SIZE, filteredRepos.length));
+      increaseRenderedCount('scroll');
     }
-  }, [filteredRepos.length]);
+  }, [increaseRenderedCount]);
 
   const getDraft = useCallback(
     (repo: StarRepo): EditDraft => {
@@ -388,7 +586,18 @@ export default function StarPageApp(props: { initialData: StarRepoData }) {
           remarks: draft.remarks
         });
 
-        setData(updated);
+        setData((previous) => ({
+          ...previous,
+          repos: previous.repos.map((item) =>
+            item.id === repo.id
+              ? {
+                  ...item,
+                  tags: updated.repos.find((updatedRepo) => updatedRepo.id === repo.id)?.tags || parsedTags,
+                  remarks: updated.repos.find((updatedRepo) => updatedRepo.id === repo.id)?.remarks || draft.remarks.trim()
+                }
+              : item
+          )
+        }));
         setSaveMessages((previous) => ({
           ...previous,
           [repo.id]: '已保存并提交到 data.json。'
@@ -427,11 +636,12 @@ export default function StarPageApp(props: { initialData: StarRepoData }) {
               p: 2,
               border: 1,
               borderColor: 'divider',
-              bgcolor: 'background.paper'
+              bgcolor: 'background.paper',
+              overflowX: 'auto'
             }}
           >
-            <Stack direction={{ xs: 'column', lg: 'row' }} spacing={1.5} alignItems={{ xs: 'stretch', lg: 'center' }}>
-              <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 160 }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, minWidth: { xs: 720, md: 'auto' } }}>
+              <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 160, flexShrink: 0 }}>
                 <Box
                   sx={{
                     width: 28,
@@ -453,16 +663,18 @@ export default function StarPageApp(props: { initialData: StarRepoData }) {
                 </Typography>
               </Stack>
 
-              <TextField
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                size="small"
-                fullWidth
-                placeholder="搜索仓库名、描述、topic、tag"
-              />
+              <Box sx={{ flex: '1 1 auto', minWidth: 220 }}>
+                <TextField
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  size="small"
+                  fullWidth
+                  placeholder="搜索仓库名、描述、topic、tag"
+                />
+              </Box>
 
-              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                <FormControl size="small" sx={{ minWidth: 132 }}>
+              <Stack direction="row" spacing={1} sx={{ flexWrap: 'nowrap', flexShrink: 0 }}>
+                <FormControl size="small" sx={{ width: { xs: 112, sm: 132 }, flexShrink: 0 }}>
                   <InputLabel id="sort-label">排序</InputLabel>
                   <Select
                     labelId="sort-label"
@@ -478,43 +690,26 @@ export default function StarPageApp(props: { initialData: StarRepoData }) {
                   </Select>
                 </FormControl>
 
-                <FormControl size="small" sx={{ minWidth: 132 }}>
-                  <InputLabel id="topic-filter-label">Topic</InputLabel>
-                  <Select
-                    labelId="topic-filter-label"
-                    value={topic}
-                    label="Topic"
-                    onChange={(event) => setTopic(event.target.value)}
-                  >
-                    <MenuItem value="all">全部 Topic</MenuItem>
-                    {topics.map((item) => (
-                      <MenuItem key={item} value={item}>
-                        {item}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-
                 <IconButton
                   onClick={handleThemeToggle}
                   aria-label="切换主题"
                   title={isDark ? '切换到浅色模式' : '切换到深色模式'}
-                  sx={{ border: 1, borderColor: 'divider' }}
+                  sx={{ border: 1, borderColor: 'divider', flexShrink: 0 }}
                 >
                   {isDark ? <LightModeRoundedIcon /> : <DarkModeRoundedIcon />}
                 </IconButton>
 
-                <Button variant="contained" onClick={() => void handleAuthorize()} disabled={authLoading}>
+                <Button variant="contained" onClick={() => void handleAuthorize()} disabled={authLoading} sx={{ flexShrink: 0 }}>
                   {ownerAuthorized ? '重新授权' : 'Owner 授权'}
                 </Button>
 
                 {ownerAuthorized ? (
-                  <Button variant="outlined" color="error" onClick={handleLogout}>
+                  <Button variant="outlined" color="error" onClick={handleLogout} sx={{ flexShrink: 0 }}>
                     退出
                   </Button>
                 ) : null}
               </Stack>
-            </Stack>
+            </Box>
           </Paper>
 
           <Alert severity={ownerAuthorized ? 'success' : 'info'}>{authMessage}</Alert>
@@ -529,6 +724,8 @@ export default function StarPageApp(props: { initialData: StarRepoData }) {
             </Alert>
           ) : null}
 
+          {reposError ? <Alert severity="error">{reposError}</Alert> : null}
+
           <Box
             sx={{
               display: 'grid',
@@ -539,12 +736,23 @@ export default function StarPageApp(props: { initialData: StarRepoData }) {
             }}
           >
             <Box sx={{ display: 'grid', gridTemplateRows: { xs: 'auto auto', lg: '1fr 1fr' }, gap: 2, minHeight: 0 }}>
-              <Card variant="outlined" sx={{ minHeight: 0 }}>
-                <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 1, minHeight: 0 }}>
+              <Card variant="outlined" sx={{ minHeight: 0, display: 'flex' }}>
+                <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 1, minHeight: 0, flex: 1 }}>
                   <Typography variant="subtitle1" fontWeight={700}>
                     Tags
                   </Typography>
-                  <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75, alignContent: 'flex-start', overflowY: 'auto', pr: 0.5 }}>
+                  <Box
+                    sx={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: 0.75,
+                      alignContent: 'flex-start',
+                      overflowY: 'auto',
+                      pr: 0.5,
+                      minHeight: 0,
+                      flex: 1
+                    }}
+                  >
                     <Chip
                       label="全部"
                       size="small"
@@ -567,12 +775,23 @@ export default function StarPageApp(props: { initialData: StarRepoData }) {
                 </CardContent>
               </Card>
 
-              <Card variant="outlined" sx={{ minHeight: 0 }}>
-                <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 1, minHeight: 0 }}>
+              <Card variant="outlined" sx={{ minHeight: 0, display: 'flex' }}>
+                <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 1, minHeight: 0, flex: 1 }}>
                   <Typography variant="subtitle1" fontWeight={700}>
                     Topics
                   </Typography>
-                  <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75, alignContent: 'flex-start', overflowY: 'auto', pr: 0.5 }}>
+                  <Box
+                    sx={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: 0.75,
+                      alignContent: 'flex-start',
+                      overflowY: 'auto',
+                      pr: 0.5,
+                      minHeight: 0,
+                      flex: 1
+                    }}
+                  >
                     <Chip
                       label="全部"
                       size="small"
@@ -583,8 +802,7 @@ export default function StarPageApp(props: { initialData: StarRepoData }) {
                     {topics.map((item) => (
                       <Chip
                         key={item}
-                        icon={<LabelRoundedIcon fontSize="small" />}
-                        label={item}
+                        label={`#${item}`}
                         size="small"
                         color={topic === item ? 'primary' : 'default'}
                         variant={topic === item ? 'filled' : 'outlined'}
@@ -596,127 +814,164 @@ export default function StarPageApp(props: { initialData: StarRepoData }) {
               </Card>
             </Box>
 
-            <Box ref={cardsScrollRef} onScroll={loadMoreIfNeeded} sx={{ minHeight: 0, overflowY: 'auto', pr: 0.5 }}>
-              {!visibleRepos.length ? (
+            <Box ref={cardsScrollRef} onScroll={loadMoreIfNeeded} sx={{ minHeight: 0, overflowY: 'auto', pr: 0.5, position: 'relative' }}>
+              {batchHintVisible ? (
+                <Box
+                  sx={{
+                    position: 'sticky',
+                    top: 8,
+                    zIndex: 2,
+                    display: 'flex',
+                    justifyContent: 'flex-end',
+                    pointerEvents: 'none',
+                    mb: 0.75
+                  }}
+                >
+                  <Paper
+                    elevation={2}
+                    sx={{
+                      px: 1.25,
+                      py: 0.5,
+                      borderRadius: 2,
+                      bgcolor: 'background.paper',
+                      border: 1,
+                      borderColor: 'divider'
+                    }}
+                  >
+                    <Typography variant="caption" color="text.secondary">
+                      {batchHintText}
+                    </Typography>
+                  </Paper>
+                </Box>
+              ) : null}
+
+              {reposLoading ? (
+                <Alert severity="info">正在加载实时 Star 列表...</Alert>
+              ) : !visibleRepos.length ? (
                 <Alert severity="info">没有匹配结果。</Alert>
               ) : (
                 <Box
                   sx={{
-                    columnCount: { xs: 1, sm: 2, lg: 3, xl: 4 },
-                    columnGap: 12
+                    display: 'grid',
+                    gridTemplateColumns: {
+                      xs: '1fr',
+                      sm: 'repeat(2, minmax(0, 1fr))',
+                      lg: 'repeat(3, minmax(0, 1fr))',
+                      xl: 'repeat(4, minmax(0, 1fr))'
+                    },
+                    gap: 1.5,
+                    alignItems: 'start'
                   }}
                 >
-                  {visibleRepos.map((repo) => {
-                    const draft = getDraft(repo);
-                    const saveMessage = saveMessages[repo.id] || '';
-                    const saving = Boolean(savingByRepo[repo.id]);
+                  {reposByColumns.map((column, columnIndex) => (
+                    <Box key={`repo-column-${columnIndex}`} sx={{ display: 'grid', gap: 1.5, alignContent: 'start' }}>
+                      {column.map((repo) => {
+                        const draft = getDraft(repo);
+                        const saveMessage = saveMessages[repo.id] || '';
+                        const saving = Boolean(savingByRepo[repo.id]);
 
-                    return (
-                      <Card
-                        key={repo.id}
-                        variant="outlined"
-                        sx={{
-                          breakInside: 'avoid',
-                          mb: 1.5,
-                          bgcolor: 'background.paper'
-                        }}
-                      >
-                        <CardContent sx={{ display: 'grid', gap: 1.25 }}>
-                          <Stack direction="row" justifyContent="space-between" spacing={1} alignItems="flex-start">
-                            <Link
-                              href={repo.html_url}
-                              target="_blank"
-                              rel="noreferrer"
-                              underline="hover"
-                              sx={{ fontWeight: 700, wordBreak: 'break-all' }}
-                            >
-                              {repo.full_name}
-                            </Link>
-                          </Stack>
-
-                          <Stack direction="row" spacing={1} alignItems="center">
-                            <Avatar src={repo.owner.avatar_url} alt="owner avatar" sx={{ width: 24, height: 24 }} />
-                            <Typography variant="caption" color="text.secondary">
-                              {formatTimeAgo(repo.updated_at)}
-                            </Typography>
-                          </Stack>
-
-                          <Typography variant="body2" color="text.secondary">
-                            {repo.description || '无描述'}
-                          </Typography>
-
-                          <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
-                            <Chip size="small" icon={<StarRoundedIcon />} label={formatCount(repo.stargazers_count)} />
-                            <Chip size="small" icon={<CallSplitRoundedIcon />} label={formatCount(repo.forks)} />
-                            <Chip size="small" icon={<RemoveRedEyeRoundedIcon />} label={formatCount(repo.watchers)} />
-                            <Chip size="small" icon={<ErrorOutlineRoundedIcon />} label={formatCount(repo.open_issues)} />
-                          </Stack>
-
-                          {(repo.topics || []).length ? (
-                            <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
-                              {(repo.topics || []).map((item) => (
-                                <Chip key={`${repo.id}-topic-${item}`} size="small" color="info" variant="outlined" label={`#${item}`} />
-                              ))}
-                            </Stack>
-                          ) : null}
-
-                          {(repo.tags || []).length ? (
-                            <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
-                              {(repo.tags || []).map((item) => (
-                                <Chip key={`${repo.id}-tag-${item}`} size="small" color="primary" variant="outlined" label={`@${item}`} />
-                              ))}
-                            </Stack>
-                          ) : null}
-
-                          <Typography variant="caption" color="text.secondary" sx={{ borderTop: 1, borderColor: 'divider', pt: 1 }}>
-                            备注: {repo.remarks || '-'}
-                          </Typography>
-
-                          {ownerAuthorized ? (
-                            <Box sx={{ display: 'grid', gap: 1, borderTop: 1, borderColor: 'divider', pt: 1 }}>
-                              <TextField
-                                size="small"
-                                label="Tags（英文逗号分隔）"
-                                value={draft.tags}
-                                onChange={(event) => updateDraft(repo, { tags: event.target.value })}
-                              />
-                              <TextField
-                                size="small"
-                                multiline
-                                minRows={2}
-                                label="备注"
-                                value={draft.remarks}
-                                onChange={(event) => updateDraft(repo, { remarks: event.target.value })}
-                              />
-                              <Box sx={{ display: 'grid', gap: 0.5, justifyItems: 'start' }}>
-                                <Button
-                                  size="small"
-                                  variant="contained"
-                                  onClick={() => void handleSaveRepo(repo)}
-                                  disabled={saving}
+                        return (
+                          <Card
+                            key={repo.id}
+                            variant="outlined"
+                            sx={{
+                              bgcolor: 'background.paper'
+                            }}
+                          >
+                            <CardContent sx={{ display: 'grid', gap: 1.25 }}>
+                              <Stack direction="row" justifyContent="space-between" spacing={1} alignItems="flex-start">
+                                <Link
+                                  href={repo.html_url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  underline="hover"
+                                  sx={{ fontWeight: 700, wordBreak: 'break-all' }}
                                 >
-                                  保存标签与备注
-                                </Button>
-                                {saveMessage ? (
-                                  <Typography variant="caption" color="text.secondary">
-                                    {saveMessage}
-                                  </Typography>
-                                ) : null}
-                              </Box>
-                            </Box>
-                          ) : null}
-                        </CardContent>
-                      </Card>
-                    );
-                  })}
+                                  {repo.full_name}
+                                </Link>
+                              </Stack>
+
+                              <Stack direction="row" spacing={1} alignItems="center">
+                                <Avatar src={repo.owner.avatar_url} alt="owner avatar" sx={{ width: 24, height: 24 }} />
+                                <Typography variant="caption" color="text.secondary">
+                                  {formatTimeAgo(repo.updated_at)}
+                                </Typography>
+                              </Stack>
+
+                              <Typography variant="body2" color="text.secondary">
+                                {repo.description || '无描述'}
+                              </Typography>
+
+                              <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
+                                <Chip size="small" icon={<StarRoundedIcon />} label={formatCount(repo.stargazers_count)} />
+                                <Chip size="small" icon={<CallSplitRoundedIcon />} label={formatCount(repo.forks)} />
+                                <Chip size="small" icon={<ErrorOutlineRoundedIcon />} label={formatCount(repo.open_issues)} />
+                              </Stack>
+
+                              {(repo.topics || []).length ? (
+                                <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
+                                  {(repo.topics || []).map((item) => (
+                                    <Chip key={`${repo.id}-topic-${item}`} size="small" color="info" variant="outlined" label={`#${item}`} />
+                                  ))}
+                                </Stack>
+                              ) : null}
+
+                              {(repo.tags || []).length ? (
+                                <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
+                                  {(repo.tags || []).map((item) => (
+                                    <Chip key={`${repo.id}-tag-${item}`} size="small" color="primary" variant="outlined" label={`@${item}`} />
+                                  ))}
+                                </Stack>
+                              ) : null}
+
+                              <Typography variant="caption" color="text.secondary" sx={{ borderTop: 1, borderColor: 'divider', pt: 1 }}>
+                                备注: {repo.remarks || '-'}
+                              </Typography>
+
+                              {ownerAuthorized ? (
+                                <Box sx={{ display: 'grid', gap: 1, borderTop: 1, borderColor: 'divider', pt: 1 }}>
+                                  <TextField
+                                    size="small"
+                                    label="Tags（英文逗号分隔）"
+                                    value={draft.tags}
+                                    onChange={(event) => updateDraft(repo, { tags: event.target.value })}
+                                  />
+                                  <TextField
+                                    size="small"
+                                    multiline
+                                    minRows={2}
+                                    label="备注"
+                                    value={draft.remarks}
+                                    onChange={(event) => updateDraft(repo, { remarks: event.target.value })}
+                                  />
+                                  <Box sx={{ display: 'grid', gap: 0.5, justifyItems: 'start' }}>
+                                    <Button
+                                      size="small"
+                                      variant="contained"
+                                      onClick={() => void handleSaveRepo(repo)}
+                                      disabled={saving}
+                                    >
+                                      保存标签与备注
+                                    </Button>
+                                    {saveMessage ? (
+                                      <Typography variant="caption" color="text.secondary">
+                                        {saveMessage}
+                                      </Typography>
+                                    ) : null}
+                                  </Box>
+                                </Box>
+                              ) : null}
+                            </CardContent>
+                          </Card>
+                        );
+                      })}
+                    </Box>
+                  ))}
                 </Box>
               )}
             </Box>
           </Box>
 
-          <Typography variant="caption" color="text.secondary" sx={{ textAlign: 'right' }}>
-            已加载 {Math.min(visibleRepos.length, filteredRepos.length)} / {filteredRepos.length} 个仓库
-          </Typography>
         </Box>
       </Box>
     </ThemeProvider>

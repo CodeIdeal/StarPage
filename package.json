@@ -7,8 +7,7 @@
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "check": "astro check",
-    "sync-stars": "tsx scripts/sync-stars.ts"
+    "check": "astro check"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.6",
