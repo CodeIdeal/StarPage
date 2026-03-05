@@ -28,7 +28,11 @@ import StarRoundedIcon from '@mui/icons-material/StarRounded';
 import CallSplitRoundedIcon from '@mui/icons-material/CallSplitRounded';
 import ErrorOutlineRoundedIcon from '@mui/icons-material/ErrorOutlineRounded';
 import SellRoundedIcon from '@mui/icons-material/SellRounded';
-import type { StarRepo, StarRepoData } from '../../types/star-repo';
+import AddRoundedIcon from '@mui/icons-material/AddRounded';
+import EditRoundedIcon from '@mui/icons-material/EditRounded';
+import CheckRoundedIcon from '@mui/icons-material/CheckRounded';
+import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
+import type { CustomRepoData, CustomRepoFields, StarRepo, StarRepoData } from '../../types/star-repo';
 import { requestDeviceCode, pollForAccessToken } from '../../lib/auth/github-device-flow';
 import { clearToken, getToken, setToken, validateOwnerToken } from '../../lib/auth/session';
 import { saveRepoCustomFields } from '../../lib/data/update-data-json';
@@ -47,6 +51,9 @@ type EditDraft = {
   tags: string;
   remarks: string;
 };
+
+type RemarksEditorMap = Record<number, { editing: boolean; value: string }>;
+type TopicTagEditorMap = Record<number, { editing: boolean; value: string }>;
 
 type DeviceFlowState = {
   verificationUri: string;
@@ -70,6 +77,10 @@ const DATA_LOCATION = {
 const BATCH_SIZE = 24;
 const LOAD_THRESHOLD = 360;
 const EMPTY_DATA: StarRepoData = {
+  generated_at: '',
+  repos: []
+};
+const EMPTY_CUSTOM_DATA: CustomRepoData = {
   generated_at: '',
   repos: []
 };
@@ -144,6 +155,10 @@ function createDefaultDraft(repo: StarRepo): EditDraft {
   };
 }
 
+function normalizeTags(tags: string[]): string[] {
+  return Array.from(new Set(tags.map((item) => item.trim()).filter(Boolean))).slice(0, 20);
+}
+
 function mapGitHubRepo(raw: any): StarRepo {
   return {
     id: raw.id,
@@ -202,18 +217,29 @@ async function fetchAllPublicStarred(username: string): Promise<StarRepo[]> {
   return repos;
 }
 
-function parseCustomFieldsData(raw: string): StarRepoData {
-  const parsed = JSON.parse(raw) as Partial<StarRepoData>;
+function parseCustomFieldsData(raw: string): CustomRepoData {
+  const parsed = JSON.parse(raw) as Partial<CustomRepoData>;
   return {
     generated_at: typeof parsed.generated_at === 'string' ? parsed.generated_at : '',
-    repos: Array.isArray(parsed.repos) ? (parsed.repos as StarRepo[]) : []
+    repos: Array.isArray(parsed.repos)
+      ? parsed.repos
+          .map((item) => {
+            const source = item as Partial<CustomRepoFields>;
+            const id = Number(source.id);
+            if (!Number.isFinite(id)) return null;
+            return {
+              id,
+              tags: normalizeTags(Array.isArray(source.tags) ? source.tags : []),
+              remarks: typeof source.remarks === 'string' ? source.remarks : ''
+            };
+          })
+          .filter((item): item is CustomRepoFields => Boolean(item))
+      : []
   };
 }
 
-function mergeLiveWithCustomFields(liveRepos: StarRepo[], customData: StarRepoData): StarRepoData {
-  const customById = new Map(
-    customData.repos.map((repo) => [repo.id, { tags: repo.tags ?? [], remarks: repo.remarks ?? '' }])
-  );
+function mergeLiveWithCustomFields(liveRepos: StarRepo[], customData: CustomRepoData): StarRepoData {
+  const customById = new Map(customData.repos.map((repo) => [repo.id, { tags: repo.tags, remarks: repo.remarks }]));
 
   return {
     generated_at: new Date().toISOString(),
@@ -227,6 +253,32 @@ function mergeLiveWithCustomFields(liveRepos: StarRepo[], customData: StarRepoDa
           }
         : repo;
     })
+  };
+}
+
+function upsertCustomFields(source: CustomRepoData, repoId: number, tags: string[], remarks: string): CustomRepoData {
+  const normalizedTags = normalizeTags(tags);
+  const normalizedRemarks = remarks.trim();
+  const index = source.repos.findIndex((repo) => repo.id === repoId);
+
+  if (index < 0) {
+    return {
+      generated_at: new Date().toISOString(),
+      repos: [...source.repos, { id: repoId, tags: normalizedTags, remarks: normalizedRemarks }]
+    };
+  }
+
+  return {
+    generated_at: new Date().toISOString(),
+    repos: source.repos.map((repo) =>
+      repo.id === repoId
+        ? {
+            id: repo.id,
+            tags: normalizedTags,
+            remarks: normalizedRemarks
+          }
+        : repo
+    )
   };
 }
 
@@ -250,9 +302,27 @@ export default function StarPageApp() {
   const [batchHintText, setBatchHintText] = useState('');
   const [reposLoading, setReposLoading] = useState(true);
   const [reposError, setReposError] = useState('');
+  const [customData, setCustomData] = useState<CustomRepoData>(EMPTY_CUSTOM_DATA);
+  const [remarksEditors, setRemarksEditors] = useState<RemarksEditorMap>({});
+  const [topicTagEditors, setTopicTagEditors] = useState<TopicTagEditorMap>({});
 
   const cardsScrollRef = useRef<HTMLDivElement | null>(null);
   const batchHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const applyOptimisticCustomUpdate = useCallback((repoId: number, tags: string[], remarks: string) => {
+    setData((previous) => ({
+      ...previous,
+      repos: previous.repos.map((repo) =>
+        repo.id === repoId
+          ? {
+              ...repo,
+              tags: normalizeTags(tags),
+              remarks: remarks.trim()
+            }
+          : repo
+      )
+    }));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -272,18 +342,19 @@ export default function StarPageApp() {
 
         const liveRepos = await fetchAllPublicStarred(STARRED_USERNAME);
 
-        let customData = EMPTY_DATA;
+        let nextCustomData = EMPTY_CUSTOM_DATA;
         if (DATA_LOCATION.owner && DATA_LOCATION.repo) {
           try {
             const customRaw = await getPublicContentFile(DATA_LOCATION);
-            customData = parseCustomFieldsData(customRaw);
+            nextCustomData = parseCustomFieldsData(customRaw);
           } catch {
-            customData = EMPTY_DATA;
+            nextCustomData = EMPTY_CUSTOM_DATA;
           }
         }
 
         if (cancelled) return;
-        setData(mergeLiveWithCustomFields(liveRepos, customData));
+        setCustomData(nextCustomData);
+        setData(mergeLiveWithCustomFields(liveRepos, nextCustomData));
       } catch (error) {
         if (cancelled) return;
         setReposError(`仓库加载失败: ${error instanceof Error ? error.message : 'unknown error'}`);
@@ -494,7 +565,7 @@ export default function StarPageApp() {
       setToken(nextToken);
       setTokenState(nextToken);
       setOwnerAuthorized(true);
-      setAuthMessage(`已授权为 owner (${OWNER_LOGIN})：可编辑 tags/remarks`);
+      setAuthMessage(`已授权为 owner (${OWNER_LOGIN})：可编辑 tags/remarks（含 topic 区域快速加 tag）`);
       setDeviceFlow(null);
     } catch (error) {
       setAuthMessage(`授权失败: ${error instanceof Error ? error.message : 'unknown error'}`);
@@ -540,7 +611,7 @@ export default function StarPageApp() {
 
         setTokenState(existingToken);
         setOwnerAuthorized(true);
-        setAuthMessage(`已授权为 owner (${OWNER_LOGIN})：可编辑 tags/remarks`);
+        setAuthMessage(`已授权为 owner (${OWNER_LOGIN})：可编辑 tags/remarks（含 topic 区域快速加 tag）`);
       } catch {
         if (cancelled) return;
         clearToken();
@@ -557,61 +628,155 @@ export default function StarPageApp() {
     };
   }, []);
 
-  const handleSaveRepo = useCallback(
-    async (repo: StarRepo) => {
+  const persistCustomFields = useCallback(
+    async (repoId: number, nextTags: string[], nextRemarks: string) => {
       if (!ownerAuthorized || !token) {
         setSaveMessages((previous) => ({
           ...previous,
-          [repo.id]: '仅 owner 可以编辑。'
+          [repoId]: '仅 owner 可以编辑。'
         }));
+        return false;
+      }
+
+      const normalizedTags = normalizeTags(nextTags);
+      const normalizedRemarks = nextRemarks.trim();
+      const previousCustomData = customData;
+      const nextCustomData = upsertCustomFields(previousCustomData, repoId, normalizedTags, normalizedRemarks);
+
+      try {
+        setSavingByRepo((previous) => ({ ...previous, [repoId]: true }));
+        setSaveMessages((previous) => ({ ...previous, [repoId]: '保存中...' }));
+
+        setCustomData(nextCustomData);
+        applyOptimisticCustomUpdate(repoId, normalizedTags, normalizedRemarks);
+
+        await saveRepoCustomFields({
+          location: DATA_LOCATION,
+          token,
+          repoId,
+          tags: normalizedTags,
+          remarks: normalizedRemarks
+        });
+
+        setEditCache((previous) => {
+          const current = previous[repoId];
+          if (!current) return previous;
+          return {
+            ...previous,
+            [repoId]: {
+              ...current,
+              tags: normalizedTags.join(', '),
+              remarks: normalizedRemarks
+            }
+          };
+        });
+
+        setSaveMessages((previous) => ({
+          ...previous,
+          [repoId]: '已保存并提交到 data.json。'
+        }));
+        return true;
+      } catch (error) {
+        setCustomData(previousCustomData);
+        const previousItem = previousCustomData.repos.find((item) => item.id === repoId);
+        applyOptimisticCustomUpdate(repoId, previousItem?.tags || [], previousItem?.remarks || '');
+        setSaveMessages((previous) => ({
+          ...previous,
+          [repoId]: `保存失败: ${error instanceof Error ? error.message : 'unknown error'}`
+        }));
+        return false;
+      } finally {
+        setSavingByRepo((previous) => ({ ...previous, [repoId]: false }));
+      }
+    },
+    [applyOptimisticCustomUpdate, customData, ownerAuthorized, token]
+  );
+
+  const handleSaveRepo = useCallback(
+    async (repo: StarRepo) => {
+      const draft = getDraft(repo);
+      const parsedTags = draft.tags
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+
+      await persistCustomFields(repo.id, parsedTags, draft.remarks);
+    },
+    [getDraft, persistCustomFields]
+  );
+
+  const startRemarksEdit = useCallback((repo: StarRepo) => {
+    setRemarksEditors((previous) => ({
+      ...previous,
+      [repo.id]: {
+        editing: true,
+        value: repo.remarks || ''
+      }
+    }));
+  }, []);
+
+  const cancelRemarksEdit = useCallback((repoId: number) => {
+    setRemarksEditors((previous) => {
+      const next = { ...previous };
+      delete next[repoId];
+      return next;
+    });
+  }, []);
+
+  const submitRemarksEdit = useCallback(
+    async (repo: StarRepo) => {
+      const editor = remarksEditors[repo.id];
+      if (!editor) return;
+
+      const ok = await persistCustomFields(repo.id, repo.tags || [], editor.value);
+      if (ok) {
+        setRemarksEditors((previous) => {
+          const next = { ...previous };
+          delete next[repo.id];
+          return next;
+        });
+      }
+    },
+    [persistCustomFields, remarksEditors]
+  );
+
+  const startTopicTagEdit = useCallback((repoId: number) => {
+    setTopicTagEditors((previous) => ({
+      ...previous,
+      [repoId]: {
+        editing: true,
+        value: ''
+      }
+    }));
+  }, []);
+
+  const cancelTopicTagEdit = useCallback((repoId: number) => {
+    setTopicTagEditors((previous) => {
+      const next = { ...previous };
+      delete next[repoId];
+      return next;
+    });
+  }, []);
+
+  const submitTopicTagEdit = useCallback(
+    async (repo: StarRepo) => {
+      const editor = topicTagEditors[repo.id];
+      if (!editor) return;
+
+      const topicAsTag = editor.value.trim();
+      if (!topicAsTag) {
+        cancelTopicTagEdit(repo.id);
         return;
       }
 
-      const draft = getDraft(repo);
+      const nextTags = normalizeTags([...(repo.tags || []), topicAsTag]);
+      const ok = await persistCustomFields(repo.id, nextTags, repo.remarks || '');
 
-      try {
-        setSavingByRepo((previous) => ({ ...previous, [repo.id]: true }));
-        setSaveMessages((previous) => ({ ...previous, [repo.id]: '保存中...' }));
-
-        const parsedTags = draft.tags
-          .split(',')
-          .map((item) => item.trim())
-          .filter(Boolean);
-
-        const updated = await saveRepoCustomFields({
-          location: DATA_LOCATION,
-          token,
-          repoId: repo.id,
-          tags: parsedTags,
-          remarks: draft.remarks
-        });
-
-        setData((previous) => ({
-          ...previous,
-          repos: previous.repos.map((item) =>
-            item.id === repo.id
-              ? {
-                  ...item,
-                  tags: updated.repos.find((updatedRepo) => updatedRepo.id === repo.id)?.tags || parsedTags,
-                  remarks: updated.repos.find((updatedRepo) => updatedRepo.id === repo.id)?.remarks || draft.remarks.trim()
-                }
-              : item
-          )
-        }));
-        setSaveMessages((previous) => ({
-          ...previous,
-          [repo.id]: '已保存并提交到 data.json。'
-        }));
-      } catch (error) {
-        setSaveMessages((previous) => ({
-          ...previous,
-          [repo.id]: `保存失败: ${error instanceof Error ? error.message : 'unknown error'}`
-        }));
-      } finally {
-        setSavingByRepo((previous) => ({ ...previous, [repo.id]: false }));
+      if (ok) {
+        cancelTopicTagEdit(repo.id);
       }
     },
-    [getDraft, ownerAuthorized, token]
+    [cancelTopicTagEdit, persistCustomFields, topicTagEditors]
   );
 
   return (
@@ -908,11 +1073,45 @@ export default function StarPageApp() {
                                 <Chip size="small" icon={<ErrorOutlineRoundedIcon />} label={formatCount(repo.open_issues)} />
                               </Stack>
 
-                              {(repo.topics || []).length ? (
-                                <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
-                                  {(repo.topics || []).map((item) => (
-                                    <Chip key={`${repo.id}-topic-${item}`} size="small" color="info" variant="outlined" label={`#${item}`} />
-                                  ))}
+                              <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap alignItems="center">
+                                {(repo.topics || []).map((item) => (
+                                  <Chip key={`${repo.id}-topic-${item}`} size="small" color="info" variant="outlined" label={`#${item}`} />
+                                ))}
+                                {ownerAuthorized ? (
+                                  <IconButton
+                                    size="small"
+                                    title="从 topic 区域快速添加 tag"
+                                    aria-label="添加 tag"
+                                    onClick={() => startTopicTagEdit(repo.id)}
+                                    disabled={saving}
+                                  >
+                                    <AddRoundedIcon fontSize="small" />
+                                  </IconButton>
+                                ) : null}
+                              </Stack>
+
+                              {ownerAuthorized && topicTagEditors[repo.id]?.editing ? (
+                                <Stack direction="row" spacing={0.75} alignItems="center">
+                                  <TextField
+                                    size="small"
+                                    placeholder="新增 tag（来自 topic 区域）"
+                                    value={topicTagEditors[repo.id]?.value || ''}
+                                    onChange={(event) =>
+                                      setTopicTagEditors((previous) => ({
+                                        ...previous,
+                                        [repo.id]: {
+                                          editing: true,
+                                          value: event.target.value
+                                        }
+                                      }))
+                                    }
+                                  />
+                                  <IconButton size="small" aria-label="提交新增tag" onClick={() => void submitTopicTagEdit(repo)} disabled={saving}>
+                                    <CheckRoundedIcon fontSize="small" />
+                                  </IconButton>
+                                  <IconButton size="small" aria-label="取消新增tag" onClick={() => cancelTopicTagEdit(repo.id)} disabled={saving}>
+                                    <CloseRoundedIcon fontSize="small" />
+                                  </IconButton>
                                 </Stack>
                               ) : null}
 
@@ -924,25 +1123,56 @@ export default function StarPageApp() {
                                 </Stack>
                               ) : null}
 
-                              <Typography variant="caption" color="text.secondary" sx={{ borderTop: 1, borderColor: 'divider', pt: 1 }}>
-                                备注: {repo.remarks || '-'}
-                              </Typography>
+                              <Stack
+                                direction="row"
+                                spacing={0.5}
+                                alignItems="center"
+                                sx={{ borderTop: 1, borderColor: 'divider', pt: 1, minHeight: 28 }}
+                              >
+                                {ownerAuthorized && remarksEditors[repo.id]?.editing ? (
+                                  <>
+                                    <TextField
+                                      size="small"
+                                      fullWidth
+                                      value={remarksEditors[repo.id]?.value || ''}
+                                      onChange={(event) =>
+                                        setRemarksEditors((previous) => ({
+                                          ...previous,
+                                          [repo.id]: {
+                                            editing: true,
+                                            value: event.target.value
+                                          }
+                                        }))
+                                      }
+                                    />
+                                    <IconButton size="small" aria-label="提交备注" onClick={() => void submitRemarksEdit(repo)} disabled={saving}>
+                                      <CheckRoundedIcon fontSize="small" />
+                                    </IconButton>
+                                    <IconButton size="small" aria-label="取消备注编辑" onClick={() => cancelRemarksEdit(repo.id)} disabled={saving}>
+                                      <CloseRoundedIcon fontSize="small" />
+                                    </IconButton>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
+                                      备注: {repo.remarks || '-'}
+                                    </Typography>
+                                    {ownerAuthorized ? (
+                                      <IconButton size="small" aria-label="编辑备注" onClick={() => startRemarksEdit(repo)} disabled={saving}>
+                                        <EditRoundedIcon fontSize="small" />
+                                      </IconButton>
+                                    ) : null}
+                                  </>
+                                )}
+                              </Stack>
 
                               {ownerAuthorized ? (
-                                <Box sx={{ display: 'grid', gap: 1, borderTop: 1, borderColor: 'divider', pt: 1 }}>
+                                <Box sx={{ display: 'grid', gap: 1 }}>
                                   <TextField
                                     size="small"
                                     label="Tags（英文逗号分隔）"
                                     value={draft.tags}
                                     onChange={(event) => updateDraft(repo, { tags: event.target.value })}
-                                  />
-                                  <TextField
-                                    size="small"
-                                    multiline
-                                    minRows={2}
-                                    label="备注"
-                                    value={draft.remarks}
-                                    onChange={(event) => updateDraft(repo, { remarks: event.target.value })}
                                   />
                                   <Box sx={{ display: 'grid', gap: 0.5, justifyItems: 'start' }}>
                                     <Button
@@ -951,7 +1181,7 @@ export default function StarPageApp() {
                                       onClick={() => void handleSaveRepo(repo)}
                                       disabled={saving}
                                     >
-                                      保存标签与备注
+                                      保存 tags
                                     </Button>
                                     {saveMessage ? (
                                       <Typography variant="caption" color="text.secondary">

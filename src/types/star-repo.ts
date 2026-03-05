@@ -24,3 +24,14 @@ export interface StarRepoData {
   generated_at: string;
   repos: StarRepo[];
 }
+
+export interface CustomRepoFields {
+  id: number;
+  tags: string[];
+  remarks: string;
+}
+
+export interface CustomRepoData {
+  generated_at: string;
+  repos: CustomRepoFields[];
+}

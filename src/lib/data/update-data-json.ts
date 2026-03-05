@@ -1,48 +1,44 @@
-import type { StarRepoData } from '../../types/star-repo';
+import type { CustomRepoData } from '../../types/star-repo';
 import { getContentFile, updateContentFile, type DataFileLocation } from '../github/contents-api';
 
-function applyCustomFields(
-  source: StarRepoData,
-  repoId: number,
-  tags: string[],
-  remarks: string
-): StarRepoData {
-  const normalizedTags = Array.from(new Set(tags.map((item) => item.trim()).filter(Boolean))).slice(0, 20);
+function normalizeTags(tags: string[]): string[] {
+  return Array.from(new Set(tags.map((item) => item.trim()).filter(Boolean))).slice(0, 20);
+}
+
+function parseCustomRepoData(raw: string): CustomRepoData {
+  const parsed = JSON.parse(raw) as Partial<CustomRepoData>;
+  return {
+    generated_at: typeof parsed.generated_at === 'string' ? parsed.generated_at : '',
+    repos: Array.isArray(parsed.repos)
+      ? parsed.repos
+          .map((item) => ({
+            id: Number((item as { id?: unknown }).id),
+            tags: normalizeTags(Array.isArray((item as { tags?: unknown }).tags) ? ((item as { tags?: unknown }).tags as string[]) : []),
+            remarks: typeof (item as { remarks?: unknown }).remarks === 'string' ? (item as { remarks?: string }).remarks!.trim() : ''
+          }))
+          .filter((item) => Number.isFinite(item.id))
+      : []
+  };
+}
+
+function applyCustomFields(source: CustomRepoData, repoId: number, tags: string[], remarks: string): CustomRepoData {
+  const normalizedTags = normalizeTags(tags);
   const normalizedRemarks = remarks.trim();
   const index = source.repos.findIndex((repo) => repo.id === repoId);
 
   if (index < 0) {
     return {
-      ...source,
-      repos: [
-        ...source.repos,
-        {
-          id: repoId,
-          full_name: '',
-          owner: { avatar_url: '' },
-          html_url: '',
-          stargazers_count: 0,
-          forks: 0,
-          open_issues: 0,
-          watchers: 0,
-          description: '',
-          homepage: '',
-          updated_at: source.generated_at || new Date().toISOString(),
-          license: null,
-          topics: [],
-          tags: normalizedTags,
-          remarks: normalizedRemarks
-        }
-      ]
+      generated_at: new Date().toISOString(),
+      repos: [...source.repos, { id: repoId, tags: normalizedTags, remarks: normalizedRemarks }]
     };
   }
 
   return {
-    ...source,
+    generated_at: new Date().toISOString(),
     repos: source.repos.map((repo) =>
       repo.id === repoId
         ? {
-            ...repo,
+            id: repo.id,
             tags: normalizedTags,
             remarks: normalizedRemarks
           }
@@ -57,14 +53,14 @@ export async function saveRepoCustomFields(params: {
   repoId: number;
   tags: string[];
   remarks: string;
-}): Promise<StarRepoData> {
+}): Promise<CustomRepoData> {
   let attempt = 0;
 
   while (attempt < 2) {
     attempt += 1;
 
     const current = await getContentFile(params.location, params.token);
-    const parsed = JSON.parse(current.text) as StarRepoData;
+    const parsed = parseCustomRepoData(current.text);
     const updated = applyCustomFields(parsed, params.repoId, params.tags, params.remarks);
 
     try {
@@ -73,7 +69,7 @@ export async function saveRepoCustomFields(params: {
         token: params.token,
         sha: current.sha,
         content: `${JSON.stringify(updated, null, 2)}\n`,
-        message: `chore(data): update tags/remarks for repo ${params.repoId}`
+        message: `chore(data): update custom fields for repo ${params.repoId}`
       });
 
       return updated;
