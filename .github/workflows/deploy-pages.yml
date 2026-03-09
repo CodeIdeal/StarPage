@@ -26,6 +26,8 @@ jobs:
         run: npm ci
 
       - name: Build site
+        env:
+          PUBLIC_GITHUB_STARRED_USERNAME: ${{ github.repository_owner }}
         run: npm run build
 
       - name: Publish to deploy branch
